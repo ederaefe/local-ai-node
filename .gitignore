@@ -1,0 +1,37 @@
+# Large Language Model Weights (Download separately via Hugging Face)
+*.gguf
+*.bin
+*.safetensors
+
+# Compressed distribution archives
+*.zip
+*.tar.*
+*.gz
+*.7z
+
+# Upstream compiled binaries and shared libraries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Runtime logs and active session states
+logs/
+*.log
+server_config.json
+server_profiles.json
+.server.pid
+
+# Python environment & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# System and editor files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

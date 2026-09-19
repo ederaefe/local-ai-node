@@ -1,0 +1,8 @@
+# Optional enhancements for Local AI Node Control Center
+# The core application runs on pure Python standard library with zero mandatory dependencies.
+
+# Enables in-terminal ASCII QR code generation for one-scan phone pairing
+qrcode>=7.4.2
+
+# Enables system hardware profiling (RAM and memory inspection)
+psutil>=5.9.0

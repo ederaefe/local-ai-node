@@ -27,3 +27,11 @@ Non-blocking local audit verifying:
 - Windows Advanced Firewall inbound rule posture (`netsh advfirewall`).
 - Disk headroom for memory-mapped file paging.
 - RAM availability via system performance monitors.
+
+### 5. Multi-Tool Engine Integration & Performance Tuning (Setup-Engine)
+- **Unified Command Center**: Replaced legacy standalone script with `Setup-Engine.py`, exposing cohesive interactive wrappers around primary `llama.cpp` toolchains.
+- **Direct Terminal Chat Integration (`llama-cli`)**: Spawns interactive conversation sessions directly in the active shell without launching the HTTP server daemon or web browser. Uses `--conversation` (`-cnv`) and `--simple-io` for terminal compatibility.
+- **Hardware Performance Profiling (`llama-bench`)**: Wraps the compiled benchmarking tool to evaluate prompt throughput (`PP` tokens/sec) and generation speed (`TG` tokens/sec) across local CPU/GPU hardware configurations.
+- **Parametric Inference Tuning**: Permits runtime configuration of context window size (`-c`), CPU core allocation (`-t`), GPU layer offloading (`-ngl`), and Flash Attention (`-fa`) during server deployment and within persistent profile presets (`server_profiles.json`).
+- **Defensive Process Hygiene**: Integrates Python `atexit` registration and interactive zombie process termination (`taskkill` / `pkill`) to prevent port locking or resource exhaustion from orphaned server daemons.
+

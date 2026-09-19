@@ -22,18 +22,18 @@ Built specifically for **ultra-remote, air-gapped, and zero-connectivity environ
 ```text
  +-------------------------------------------------------------+
  |                   Local AI Node Controller                  |
- |                      (Asetup.py - TUI)                      |
+ |                   (Setup-Engine.py - TUI)                   |
  +------------------------------+------------------------------+
                                 |
         +-----------------------+-----------------------+
         |                                               |
         v                                               v
  +----------------------------+           +----------------------------+
- |     System Diagnostics     |           |     Process Supervisor     |
- | - Binary discovery         |           | - Background child daemon  |
- | - Port availability        |           | - Rotated logs (logs/)     |
- | - RAM & Disk headroom      |           | - Graceful exit handler    |
- | - Windows Firewall audit   |           |                            |
+ |     System Diagnostics     |           |     Multi-Tool Supervisor  |
+ | - Binary discovery         |           | - llama-server daemon      |
+ | - Port availability        |           | - llama-cli chat session   |
+ | - RAM & Disk headroom      |           | - llama-bench profiler     |
+ | - Windows Firewall audit   |           | - Rotated logs (logs/)     |
  +----------------------------+           +--------------+-------------+
                                                          |
                                                          v
@@ -64,22 +64,26 @@ Built specifically for **ultra-remote, air-gapped, and zero-connectivity environ
 
 ### 2. Launch the Control Center
 
-Place `Asetup.py` in the same directory as your `llama-server.exe` (or in its parent directory):
+Place `Setup-Engine.py` in the same directory as your `llama-server.exe`:
 
 ```bash
-python Asetup.py
+python Setup-Engine.py
 ```
 
-### 3. Follow the 4-Step Wizard
+### 3. Choose from the Core Engine Menu
 
-1. **Pick a Model**: The scanner automatically discovers all `.gguf` files in your directory and subdirectories.
-2. **Confirm Port**: A collision-free random port is generated automatically, or you can enter your own.
-3. **Choose Access Mode**:
-   - `0.0.0.0` &mdash; Accessible to your entire local network (phones, tablets, laptops on Wi-Fi/hotspot).
-   - `127.0.0.1` &mdash; Accessible only from this local computer.
-4. **Launch & Connect**:
-   - **On Desktop**: Open `http://localhost:<port>` in your browser.
-   - **On Mobile**: Scan the terminal ASCII QR code with your phone camera while on the same Wi-Fi or hotspot.
+1. **Quick Start Server**:
+   - Pick a model (auto-detected recursively).
+   - Confirm collision-free port.
+   - Choose network binding (`0.0.0.0` for LAN / mobile devices, or `127.0.0.1` for local only).
+   - Optional hardware tuning (context size `-c`, CPU threads `-t`, GPU layers `-ngl`, Flash Attention `-fa`).
+   - Connect on desktop (`http://localhost:<port>`) or mobile (scan terminal QR code).
+2. **Direct Terminal Chat (`llama-cli`)**:
+   - Converse with any downloaded `.gguf` model right in your console without running a server daemon or web browser.
+3. **Hardware Benchmark (`llama-bench`)**:
+   - Instant token speed profiling for prompt processing (`PP`) and text generation (`TG`).
+4. **Kill Lingering Nodes**:
+   - Clean up orphaned background `llama-server.exe` processes holding ports or memory.
 
 ---
 
@@ -88,12 +92,15 @@ python Asetup.py
 A standard folder arrangement:
 
 ```text
-├── Asetup.py                    # Local AI Node interactive control center
+├── Setup-Engine.py              # Local AI Node interactive control center
 ├── requirements.txt             # Optional enhancement packages
 ├── LICENSE                      # Project license and upstream attribution
 ├── README.md                    # Documentation
-├── llama-server.exe             # Upstream llama.cpp binary (downloaded separately)
-├── ggml-*.dll                   # Upstream runtime DLLs (downloaded separately)
+├── documentation.md             # Technical architecture and developer reference
+├── llama-server.exe             # Upstream llama.cpp server binary
+├── llama-cli.exe                # Upstream direct CLI inference tool
+├── llama-bench.exe              # Upstream hardware benchmark tool
+├── ggml-*.dll                   # Upstream runtime DLLs
 ├── models/                      # Folder containing your .gguf models
 │   ├── Llama-3.2-1B-Instruct.gguf
 │   └── Qwen2.5-1.5B-Instruct.gguf

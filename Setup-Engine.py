@@ -3,13 +3,14 @@
 Setup-Engine.py - Next-Gen Interactive Control Center for llama.cpp LAN Node.
 
 Interactive terminal control center designed for ULTRA REMOTE / air-gapped environments.
-Provides single-stroke keyboard navigation, hardware diagnostics, multi-tool wrappers
-(llama-server, llama-cli, llama-bench), closed-loop HTTP health telemetry, and OpenAI-compatible
-in-terminal test queries.
+Supports dual-mode execution (Interactive TUI and Headless CLI automation), multi-adapter
+network interface resolution, pure-Python binary GGUF header inspection, multi-tool wrappers
+(llama-server, llama-cli, llama-bench), closed-loop HTTP health telemetry, and live in-terminal chat.
 
-Built on Python standard library modules (socket, subprocess, ctypes, urllib, msvcrt).
+Built entirely on Python standard library modules (socket, subprocess, ctypes, urllib, struct, argparse, msvcrt).
 """
 
+import argparse
 import atexit
 import ctypes
 import json
@@ -18,6 +19,7 @@ import platform
 import random
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -112,6 +114,7 @@ SERVER_LOG_PATH = None
 SERVER_INFO = {}
 
 DEPS_PERMANENTLY_SKIPPED = False
+SELECTED_ADAPTER_IP = None
 
 
 # --------------------------------------------------------------------------
@@ -140,7 +143,7 @@ if IS_WINDOWS:
         PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
         def win32_ctrl_handler(dwCtrlType):
             cleanup_on_exit()
-            return False  # Let default OS handler complete the shutdown
+            return False  # Let default OS handler complete shutdown
         _win32_handler = PHANDLER_ROUTINE(win32_ctrl_handler)
         ctypes.windll.kernel32.SetConsoleCtrlHandler(_win32_handler, True)
     except Exception:
@@ -166,8 +169,8 @@ def prune_logs(max_retention=MAX_LOG_RETENTION):
 
 def read_single_key(prompt_text="", valid_keys=None):
     """
-    Captures a single keypress without requiring the Enter key on Windows.
-    Falls back gracefully to standard line input on other environments.
+    Captures a single keypress without requiring Enter on Windows consoles.
+    Falls back gracefully to standard line input in other environments.
     """
     sys.stdout.write(f"    {UI.PURPLE}❯{UI.RESET} {UI.BASE}{prompt_text}")
     sys.stdout.flush()
@@ -175,9 +178,8 @@ def read_single_key(prompt_text="", valid_keys=None):
     if msvcrt and sys.stdin.isatty():
         while True:
             char = msvcrt.getch()
-            # Handle special or arrow key prefixes
             if char in (b'\x00', b'\xe0'):
-                msvcrt.getch()  # consume second code
+                msvcrt.getch()
                 continue
             try:
                 k = char.decode('utf-8', errors='ignore')
@@ -185,7 +187,6 @@ def read_single_key(prompt_text="", valid_keys=None):
                 continue
 
             if valid_keys is None or k.lower() in [v.lower() for v in valid_keys] or k in ('\r', '\n', '\x1b'):
-                # Handle Enter / Esc
                 if k in ('\r', '\n'):
                     sys.stdout.write("\n")
                     return ""
@@ -249,20 +250,53 @@ def prompt(text, default=None, show_options=True):
 
 
 # --------------------------------------------------------------------------
-# Network, Port & Health Telemetry
+# Multi-Adapter Network & Telemetry Engine
 # --------------------------------------------------------------------------
 
-def get_lan_ip():
-    """Resolves the active LAN IP interface via local socket routing without WAN transmission."""
+def get_all_lan_ips():
+    """
+    Enumerates all active IPv4 interfaces on the workstation (Wi-Fi, Ethernet, Hotspot, WSL).
+    Sorts physical routable subnets (192.168.x.x, 10.x.x.x) above virtual bridges (172.x.x.x).
+    """
+    discovered = set()
+    try:
+        hostname = socket.gethostname()
+        for addr in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = addr[4][0]
+            if not ip.startswith("127."):
+                discovered.add(ip)
+    except Exception:
+        pass
+
+    # Unconnected UDP socket routing probe as secondary discovery
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-    except OSError:
-        ip = "127.0.0.1"
+        discovered.add(s.getsockname()[0])
+    except Exception:
+        pass
     finally:
         s.close()
-    return ip
+
+    def sort_key(ip):
+        # Prioritize physical consumer LANs first
+        if ip.startswith("192.168."):
+            return 0
+        if ip.startswith("10."):
+            return 1
+        return 2  # e.g. 172.x WSL/Hyper-V
+
+    sorted_ips = sorted(list(discovered), key=sort_key)
+    return sorted_ips if sorted_ips else ["127.0.0.1"]
+
+
+def get_lan_ip():
+    """Returns the currently active or preferred physical LAN IP address."""
+    global SELECTED_ADAPTER_IP
+    if SELECTED_ADAPTER_IP:
+        return SELECTED_ADAPTER_IP
+    ips = get_all_lan_ips()
+    return ips[0]
 
 
 def is_port_free(port, host="0.0.0.0"):
@@ -332,7 +366,7 @@ def wait_for_server_ready(proc, port, timeout_s=25):
 
 
 def query_chat_test(port, user_message="Hello, test connection."):
-    """Performs an in-terminal test chat completion against /v1/chat/completions."""
+    """Performs a test chat completion against /v1/chat/completions."""
     url = f"http://127.0.0.1:{port}/v1/chat/completions"
     payload = {
         "messages": [
@@ -358,6 +392,117 @@ def query_chat_test(port, user_message="Hello, test connection."):
             return {"ok": True, "reply": reply, "elapsed_s": elapsed, "tps": tps}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def interactive_server_chat(port):
+    """Live interactive multi-turn terminal conversation against the active llama-server process."""
+    draw_box("Live Terminal Chat", "Active Node Conversation")
+    breadcrumb("Home", "Node Telemetry", "Live Terminal Chat")
+    explain("Conversational session streaming against the active server daemon. Multi-turn history preserved.")
+
+    history = [
+        {"role": "system", "content": "You are a helpful, witty, and concise offline assistant."}
+    ]
+    print(f"    {UI.EMERALD}Connected to active server on port {port}. Type '/exit' or press Ctrl+C to leave.{UI.RESET}\n")
+
+    while True:
+        try:
+            sys.stdout.write(f"    {UI.CYAN}You ❯{UI.RESET} {UI.WHITE}")
+            sys.stdout.flush()
+            user_msg = input().strip()
+            sys.stdout.write(UI.RESET)
+            if not user_msg:
+                continue
+            if user_msg.lower() in ("/exit", "exit", "quit"):
+                break
+
+            history.append({"role": "user", "content": user_msg})
+            payload = {
+                "messages": history,
+                "temperature": 0.7,
+                "max_tokens": 512
+            }
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/chat/completions",
+                data=json.dumps(payload).encode('utf-8'),
+                headers={"Content-Type": "application/json", "User-Agent": "Local-AI-Node"}
+            )
+            t0 = time.perf_counter()
+            with urllib.request.urlopen(req, timeout=45.0) as resp:
+                elapsed = round(time.perf_counter() - t0, 2)
+                res_data = json.loads(resp.read().decode('utf-8'))
+                assistant_reply = res_data["choices"][0]["message"]["content"].strip()
+                tokens = res_data.get("usage", {}).get("completion_tokens", 0)
+                tps = round(tokens / elapsed, 1) if elapsed > 0 and tokens else "?"
+                history.append({"role": "assistant", "content": assistant_reply})
+                print(f"\n    {UI.EMERALD}AI ❯{UI.RESET} {UI.WHITE}{assistant_reply}{UI.RESET}")
+                print(f"    {UI.MUTED}({elapsed}s | {tps} tokens/sec | {tokens} tokens){UI.RESET}\n")
+        except KeyboardInterrupt:
+            print(f"\n    {UI.TAG_INFO} Terminal chat session ended.\n")
+            break
+        except Exception as e:
+            print(f"\n    {UI.TAG_FAIL} Inference error: {e}\n")
+
+
+# --------------------------------------------------------------------------
+# Pure-Python Binary GGUF Metadata Parser
+# --------------------------------------------------------------------------
+
+def read_gguf_metadata(file_path):
+    """
+    Parses native GGUF file format header without third-party dependencies.
+    Extracts architecture, context length, name, parameter size, and tensor count.
+    """
+    meta = {
+        "valid": False,
+        "version": None,
+        "tensors": 0,
+        "kv_count": 0,
+        "arch": "unknown",
+        "name": None,
+        "size_label": None,
+    }
+    try:
+        with open(file_path, "rb") as f:
+            magic = f.read(4)
+            if magic != b"GGUF":
+                return meta
+            version, tensors, kvs = struct.unpack("<IQQ", f.read(20))
+            meta["valid"] = True
+            meta["version"] = version
+            meta["tensors"] = tensors
+            meta["kv_count"] = kvs
+
+            # Parse first 25 key-value metadata pairs
+            for _ in range(min(25, kvs)):
+                klen_bytes = f.read(8)
+                if len(klen_bytes) < 8:
+                    break
+                klen = struct.unpack("<Q", klen_bytes)[0]
+                key = f.read(klen).decode("utf-8", errors="ignore")
+                vtype = struct.unpack("<I", f.read(4))[0]
+
+                if vtype == 8:  # String
+                    slen = struct.unpack("<Q", f.read(8))[0]
+                    val = f.read(slen).decode("utf-8", errors="ignore")
+                    if key == "general.architecture":
+                        meta["arch"] = val
+                    elif key == "general.name":
+                        meta["name"] = val
+                    elif key == "general.size_label":
+                        meta["size_label"] = val
+                elif vtype in (4, 10):  # uint32 / uint64
+                    sz = 4 if vtype == 4 else 8
+                    val = struct.unpack("<I" if sz == 4 else "<Q", f.read(sz))[0]
+                    if "context_length" in key:
+                        meta["context_length"] = val
+                elif vtype == 7:  # bool
+                    f.read(1)
+                else:
+                    break
+    except Exception:
+        pass
+    return meta
 
 
 # --------------------------------------------------------------------------
@@ -389,8 +534,8 @@ def find_bench_exe():
 
 def scan_models():
     """
-    Recursively scans for GGUF weights, intelligently separating
-    text language models from multimodal vision projectors (mmproj).
+    Recursively scans for GGUF weights, introspecting headers to intelligently
+    separate language models from multimodal vision projectors (mmproj).
     """
     models = []
     projectors = []
@@ -399,13 +544,14 @@ def scan_models():
             size_mb = path.stat().st_size / (1024 * 1024)
         except OSError:
             size_mb = 0
-        
+
         info = {
             "path": path,
             "name": path.name,
             "rel": str(path.relative_to(BASE_DIR)),
             "size_mb": round(size_mb, 1),
             "is_mmproj": "mmproj" in path.name.lower(),
+            "meta": read_gguf_metadata(path),
         }
         if info["is_mmproj"]:
             projectors.append(info)
@@ -474,7 +620,7 @@ def choose_model(default_path=None):
         print(f"    {UI.MUTED}Drop any .gguf file into this folder and reload.{UI.RESET}{UI.BASE}")
         return None
 
-    explain("Select a model. Smaller parameter models (1B-3B) run fast on CPU; 7B+ offer deeper logic.")
+    explain("Select a model. Architecture and size are detected directly from the binary header.")
     print(f"    {UI.BOLD}Discovered LLM Weights:{UI.RESET}{UI.BASE}\n")
     default_idx = 1
     for i, m in enumerate(models, 1):
@@ -482,7 +628,8 @@ def choose_model(default_path=None):
         marker = f" {UI.EMERALD}◀ last used{UI.RESET}{UI.BASE}" if is_def else ""
         if is_def:
             default_idx = i
-        print(f"     {UI.CYAN}{i:2d}.{UI.RESET} {UI.WHITE}{m['rel']:<42}{UI.RESET} {UI.MUTED}({m['size_mb']} MB){UI.RESET}{marker}")
+        arch_str = f"[{m['meta'].get('arch', 'GGUF')}]"
+        print(f"     {UI.CYAN}{i:2d}.{UI.RESET} {UI.WHITE}{m['rel']:<38}{UI.RESET} {UI.AQUA}{arch_str:<8}{UI.RESET} {UI.MUTED}({m['size_mb']} MB){UI.RESET}{marker}")
     print()
 
     res = prompt("Pick model number", default=str(default_idx))
@@ -601,7 +748,7 @@ def profiles_menu():
 # Multi-Tool Wrappers: llama-cli & llama-bench
 # --------------------------------------------------------------------------
 
-def run_console_chat():
+def run_console_chat(model_path=None, threads=None):
     draw_box("Direct Terminal Chat", "Powered by llama-cli.exe")
     breadcrumb("Home", "Direct Terminal Chat")
     explain("Conversational inference directly in this terminal session without starting a background server.")
@@ -612,14 +759,18 @@ def run_console_chat():
         input(f"\n    {UI.MUTED}Press Enter to return...{UI.RESET}")
         return
 
-    last_cfg = load_last_config()
-    model_path = choose_model(default_path=last_cfg.get("model"))
+    if not model_path:
+        last_cfg = load_last_config()
+        model_path = choose_model(default_path=last_cfg.get("model"))
     if not model_path or model_path in ("__back__", "__quit__"):
         return
 
-    t_val = prompt("CPU Threads", default=str(DEFAULT_THREADS))
-    if t_val in ("__back__", "__quit__"):
-        return
+    if not threads:
+        t_val = prompt("CPU Threads", default=str(DEFAULT_THREADS))
+        if t_val in ("__back__", "__quit__"):
+            return
+    else:
+        t_val = threads
 
     cmd = [
         str(cli_exe),
@@ -640,7 +791,7 @@ def run_console_chat():
     input(f"\n    {UI.MUTED}Press Enter to return to menu...{UI.RESET}")
 
 
-def run_hardware_benchmark():
+def run_hardware_benchmark(model_path=None, repetitions="2"):
     draw_box("Hardware Inference Benchmark", "Powered by llama-bench.exe")
     breadcrumb("Home", "Hardware Benchmark")
     explain("Calculates prompt processing (PP) and text generation (TG) throughput in tokens/second.")
@@ -651,14 +802,18 @@ def run_hardware_benchmark():
         input(f"\n    {UI.MUTED}Press Enter to return...{UI.RESET}")
         return
 
-    last_cfg = load_last_config()
-    model_path = choose_model(default_path=last_cfg.get("model"))
+    if not model_path:
+        last_cfg = load_last_config()
+        model_path = choose_model(default_path=last_cfg.get("model"))
     if not model_path or model_path in ("__back__", "__quit__"):
         return
 
-    reps = prompt("Repetitions per test", default="2")
-    if reps in ("__back__", "__quit__"):
-        return
+    if not repetitions:
+        reps = prompt("Repetitions per test", default="2")
+        if reps in ("__back__", "__quit__"):
+            return
+    else:
+        reps = repetitions
 
     cmd = [
         str(bench_exe),
@@ -693,7 +848,7 @@ def run_hardware_benchmark():
 # Server Supervisor (Daemon Management)
 # --------------------------------------------------------------------------
 
-def start_server(model_path, port, host, ctx=DEFAULT_CTX, threads=DEFAULT_THREADS, parallel=DEFAULT_PARALLEL, ngl=0, fa=False, embedding=False, mmproj_path=None):
+def start_server(model_path, port=None, host=DEFAULT_HOST, ctx=DEFAULT_CTX, threads=DEFAULT_THREADS, parallel=DEFAULT_PARALLEL, ngl=0, fa=False, embedding=False, mmproj_path=None, interactive=True):
     global SERVER_PROC, SERVER_LOG_PATH, SERVER_INFO
 
     if SERVER_PROC and SERVER_PROC.poll() is None:
@@ -757,7 +912,6 @@ def start_server(model_path, port, host, ctx=DEFAULT_CTX, threads=DEFAULT_THREAD
             cwd=str(BASE_DIR),
             creationflags=creationflags,
         )
-        # Immediately close handle in parent; child inherited the OS file descriptor
         log_handle.close()
     except Exception as e:
         print(f"\n    {UI.TAG_FAIL} Daemon spawn error: {e}")
@@ -798,26 +952,26 @@ def start_server(model_path, port, host, ctx=DEFAULT_CTX, threads=DEFAULT_THREAD
     print(f"      OpenAI API Base     : {UI.WHITE}http://{ip}:{port}/v1{UI.RESET}\n")
     print_qr(url)
 
-    # Offer immediate 1-click test prompt
-    print(f"    {UI.BOLD}Verification Check:{UI.RESET}")
-    print(f"     {UI.CYAN}[y]{UI.RESET} Send quick test prompt directly to verify inference")
-    print(f"     {UI.CYAN}[Enter / n]{UI.RESET} Continue to main menu")
-    test_k = read_single_key("Action: ", ["y", "n", ""])
-    if test_k == "y":
-        print(f"\n    {UI.TAG_INFO} Transmitting test prompt to /v1/chat/completions...")
-        res = query_chat_test(port)
-        if res["ok"]:
-            print(f"    {UI.TAG_OK} {UI.BOLD}Model Response ({res['elapsed_s']}s, {res['tps']} t/s):{UI.RESET}")
-            print(f"    {UI.WHITE}\"{res['reply']}\"{UI.RESET}\n")
-        else:
-            print(f"    {UI.TAG_FAIL} Test query failed: {res['error']}\n")
+    if interactive:
+        print(f"    {UI.BOLD}Verification Check:{UI.RESET}")
+        print(f"     {UI.CYAN}[y]{UI.RESET} Send quick test prompt directly to verify inference")
+        print(f"     {UI.CYAN}[Enter / n]{UI.RESET} Continue to main menu")
+        test_k = read_single_key("Action: ", ["y", "n", ""])
+        if test_k == "y":
+            print(f"\n    {UI.TAG_INFO} Transmitting test prompt to /v1/chat/completions...")
+            res = query_chat_test(port)
+            if res["ok"]:
+                print(f"    {UI.TAG_OK} {UI.BOLD}Model Response ({res['elapsed_s']}s, {res['tps']} t/s):{UI.RESET}")
+                print(f"    {UI.WHITE}\"{res['reply']}\"{UI.RESET}\n")
+            else:
+                print(f"    {UI.TAG_FAIL} Test query failed: {res['error']}\n")
 
     return True
 
 
 def stop_server():
     global SERVER_PROC, SERVER_INFO
-    if not SERVER_PROC or SERVER_PROC.poll() is not None:
+    if not SERVER_PROC or SERVER_PROC.poll() is None:
         print(f"\n    {UI.TAG_INFO} No active server daemon running in this session.")
         SERVER_PROC = None
         return
@@ -865,6 +1019,39 @@ def kill_zombie_servers():
     time.sleep(1.2)
 
 
+def network_interfaces_menu():
+    """Allows selecting which network adapter/IP to advertise and encode into QR codes."""
+    global SELECTED_ADAPTER_IP
+    while True:
+        draw_box("Network Interfaces", "Subnet & Adapter Routing")
+        breadcrumb("Home", "Network Interfaces")
+        explain("Select which physical or virtual network interface is advertised to client devices.")
+
+        ips = get_all_lan_ips()
+        current_ip = get_lan_ip()
+
+        print(f"    {UI.BOLD}Detected Host Network Interfaces:{UI.RESET}\n")
+        for i, ip in enumerate(ips, 1):
+            is_active = (ip == current_ip)
+            badge = f"{UI.EMERALD}◀ active broadcast{UI.RESET}" if is_active else ""
+            desc = " (Wi-Fi / Ethernet)" if ip.startswith("192.168.") or ip.startswith("10.") else " (WSL / Virtual Adapter)"
+            print(f"     {UI.CYAN}{i:2d}.{UI.RESET} {UI.WHITE}{ip:<18}{UI.RESET} {UI.MUTED}{desc:<24}{UI.RESET} {badge}")
+        print()
+
+        print(f"    {UI.MUTED}[1-{len(ips)}] Select active interface   [q] Return to menu{UI.RESET}\n")
+        k = read_single_key("Select: ", [str(i) for i in range(1, len(ips) + 1)] + ["q", ""])
+        if k in ("q", "__back__", ""):
+            return
+        try:
+            idx = int(k)
+            if 1 <= idx <= len(ips):
+                SELECTED_ADAPTER_IP = ips[idx - 1]
+                print(f"    {UI.TAG_OK} Set broadcast interface to: {UI.CYAN}{SELECTED_ADAPTER_IP}{UI.RESET}")
+                time.sleep(1)
+        except ValueError:
+            pass
+
+
 # --------------------------------------------------------------------------
 # Node Telemetry & Real-Time Telemetry Card
 # --------------------------------------------------------------------------
@@ -878,7 +1065,6 @@ def server_status_menu():
             port = SERVER_INFO.get("port")
             ip = get_lan_ip()
 
-            # Execute fast non-blocking live /health audit (0.4s timeout)
             h = probe_server_health(port, timeout_s=0.4)
             if h.get("status") == "ok":
                 health_badge = f"{UI.EMERALD}● ONLINE ({h['latency_ms']}ms){UI.RESET}"
@@ -894,15 +1080,18 @@ def server_status_menu():
             print(f"    LAN Access URL: {UI.EMERALD}http://{ip}:{port}{UI.RESET}")
             print(f"    Config Preset : {UI.MUTED}ctx={SERVER_INFO.get('ctx')}, threads={SERVER_INFO.get('threads')}, slots={SERVER_INFO.get('parallel')}{UI.RESET}\n")
 
-            print(f"    {UI.CYAN}[t]{UI.RESET} Test API Connection (In-Terminal Chat Ping)")
+            print(f"    {UI.CYAN}[c]{UI.RESET} In-Terminal Live Chat (converse directly with active model)")
+            print(f"    {UI.CYAN}[t]{UI.RESET} Test Single API Query (instant ping test)")
             print(f"    {UI.CYAN}[q]{UI.RESET} Show Terminal QR Code again")
             print(f"    {UI.CYAN}[l]{UI.RESET} Launch Live Log Stream in new window")
             print(f"    {UI.ROSE}[x]{UI.RESET} Stop Server Immediately")
             print(f"    {UI.MUTED}[Esc / Enter] Back to Main Menu{UI.RESET}\n")
 
-            k = read_single_key("Action: ", ["t", "q", "l", "x", ""])
+            k = read_single_key("Action: ", ["c", "t", "q", "l", "x", ""])
             if k in ("", "__back__"):
                 return
+            elif k == "c":
+                interactive_server_chat(port)
             elif k == "t":
                 print(f"\n    {UI.TAG_INFO} Transmitting test payload to /v1/chat/completions...")
                 res = query_chat_test(port)
@@ -947,7 +1136,6 @@ def quick_start():
     if not model_path or model_path in ("__back__", "__quit__"):
         return
 
-    # Check for vision multimodal projector companion
     mmproj_path = None
     if scan["projectors"]:
         explain("Multimodal vision projector detected. Attach vision capability?")
@@ -972,7 +1160,6 @@ def quick_start():
     host_choice = read_single_key("Select [1]: ", ["1", "2", ""])
     host = "127.0.0.1" if host_choice == "2" else "0.0.0.0"
 
-    # Hardware Tuning Stage
     ctx = last_cfg.get("ctx", DEFAULT_CTX)
     threads = last_cfg.get("threads", DEFAULT_THREADS)
     ngl = last_cfg.get("ngl", 0)
@@ -1016,9 +1203,10 @@ def main_menu():
         else:
             status_badge = f"{UI.DARK}○ OFFLINE{UI.RESET}{UI.BASE}"
 
+        current_ip = get_lan_ip()
         print(f"  {UI.CYAN}╭────────────────────────────────────────────────────────────────────╮{UI.RESET}{UI.BASE}")
         print(f"  {UI.CYAN}│{UI.RESET}{UI.BASE}   {UI.WHITE}{UI.BOLD}⬡ LOCAL AI NODE ARCHITECTURE{UI.RESET}{UI.BASE}   [{status_badge}]                 {UI.CYAN}│{UI.RESET}{UI.BASE}")
-        print(f"  {UI.CYAN}│{UI.RESET}{UI.BASE}   {UI.MUTED}Directory: {str(BASE_DIR)[-48:]:<48}{UI.RESET}{UI.BASE} {UI.CYAN}│{UI.RESET}{UI.BASE}")
+        print(f"  {UI.CYAN}│{UI.RESET}{UI.BASE}   {UI.MUTED}Subnet IP: {current_ip:<16} Root: {str(BASE_DIR)[-28:]:<28}{UI.RESET}{UI.BASE} {UI.CYAN}│{UI.RESET}{UI.BASE}")
         print(f"  {UI.CYAN}╰────────────────────────────────────────────────────────────────────╯{UI.RESET}{UI.BASE}\n")
 
         print(f"    {UI.EMERALD}EXECUTION ENGINES:{UI.RESET}{UI.BASE}")
@@ -1027,13 +1215,14 @@ def main_menu():
         print(f"     {UI.CYAN}3.{UI.RESET}{UI.BASE} {UI.WHITE}Hardware Benchmark{UI.RESET}     {UI.DARK}(evaluate prompt & eval speed via llama-bench){UI.RESET}\n")
 
         print(f"    {UI.EMERALD}NODE TELEMETRY & MANAGEMENT:{UI.RESET}{UI.BASE}")
-        print(f"     {UI.CYAN}4.{UI.RESET}{UI.BASE} {UI.WHITE}Node Status / Monitor{UI.RESET}  {UI.DARK}(health telemetry, test ping, live stream){UI.RESET}")
-        print(f"     {UI.CYAN}5.{UI.RESET}{UI.BASE} {UI.WHITE}Manage Models{UI.RESET}          {UI.DARK}(inspect GGUF models & vision projectors){UI.RESET}")
+        print(f"     {UI.CYAN}4.{UI.RESET}{UI.BASE} {UI.WHITE}Node Status / Monitor{UI.RESET}  {UI.DARK}(health telemetry, test ping, live chat, stream){UI.RESET}")
+        print(f"     {UI.CYAN}5.{UI.RESET}{UI.BASE} {UI.WHITE}Manage Models{UI.RESET}          {UI.DARK}(inspect GGUF binary headers & vision projectors){UI.RESET}")
         print(f"     {UI.CYAN}6.{UI.RESET}{UI.BASE} {UI.WHITE}Server Profiles{UI.RESET}        {UI.DARK}(save/load named configs and hardware presets){UI.RESET}")
-        print(f"     {UI.CYAN}7.{UI.RESET}{UI.BASE} {UI.WHITE}Kill Lingering Nodes{UI.RESET}   {UI.DARK}(clean up orphaned background llama-server processes){UI.RESET}")
+        print(f"     {UI.CYAN}7.{UI.RESET}{UI.BASE} {UI.WHITE}Network Adapters{UI.RESET}       {UI.DARK}(toggle Wi-Fi vs Hotspot vs virtual subnets){UI.RESET}")
+        print(f"     {UI.CYAN}8.{UI.RESET}{UI.BASE} {UI.WHITE}Kill Lingering Nodes{UI.RESET}   {UI.DARK}(clean up orphaned background llama-server processes){UI.RESET}")
         print(f"     {UI.ROSE}0.{UI.RESET}{UI.BASE} {UI.WHITE}Exit Session{UI.RESET}           {UI.DARK}(compulsory graceful halt){UI.RESET}\n")
 
-        k = read_single_key("Command › ", ["1", "2", "3", "4", "5", "6", "7", "0"])
+        k = read_single_key("Command › ", ["1", "2", "3", "4", "5", "6", "7", "8", "0"])
 
         if k == "1":
             quick_start()
@@ -1044,21 +1233,28 @@ def main_menu():
         elif k == "4":
             server_status_menu()
         elif k == "5":
-            draw_box("Model Matrix", "Discovered GGUF Weights")
+            draw_box("Model Matrix & Binary Inspection", "Pure-Python GGUF Header Reader")
+            breadcrumb("Home", "Manage Models")
             scan = scan_models()
             models = scan["models"]
             projectors = scan["projectors"]
             print(f"    {UI.TAG_OK} Discovered {len(models)} Language Model(s) and {len(projectors)} Vision Projector(s):\n")
             for i, m in enumerate(models, 1):
-                print(f"     {UI.CYAN}{i:2d}.{UI.RESET} {UI.WHITE}{m['rel']:<45}{UI.RESET} {UI.MUTED}({m['size_mb']} MB){UI.RESET}")
+                meta = m["meta"]
+                arch = meta.get("arch", "gguf")
+                name_str = meta.get("name") or m["rel"]
+                tensors = meta.get("tensors", 0)
+                print(f"     {UI.CYAN}{i:2d}.{UI.RESET} {UI.WHITE}{name_str:<32}{UI.RESET} {UI.AQUA}[arch={arch}, tensors={tensors}]{UI.RESET} {UI.MUTED}({m['size_mb']} MB){UI.RESET}")
             if projectors:
                 print(f"\n    {UI.AMBER}Vision Projectors (--mmproj):{UI.RESET}")
                 for p in projectors:
-                    print(f"     {UI.PURPLE}◈{UI.RESET} {UI.WHITE}{p['rel']:<45}{UI.RESET} {UI.MUTED}({p['size_mb']} MB){UI.RESET}")
+                    print(f"     {UI.PURPLE}◈{UI.RESET} {UI.WHITE}{p['rel']:<42}{UI.RESET} {UI.MUTED}({p['size_mb']} MB){UI.RESET}")
             input(f"\n    {UI.MUTED}Press Enter to return...{UI.RESET}")
         elif k == "6":
             profiles_menu()
         elif k == "7":
+            network_interfaces_menu()
+        elif k == "8":
             kill_zombie_servers()
         elif k == "0":
             if SERVER_PROC and SERVER_PROC.poll() is None:
@@ -1069,11 +1265,103 @@ def main_menu():
 
 
 # --------------------------------------------------------------------------
+# Headless CLI Argument Dispatcher
+# --------------------------------------------------------------------------
+
+def parse_cli_args():
+    parser = argparse.ArgumentParser(
+        description="Local AI Node - Interactive TUI & Headless Automation Control Center",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+               "  python Setup-Engine.py                          # Boots interactive TUI\n"
+               "  python Setup-Engine.py --chat                   # Direct terminal chat via llama-cli\n"
+               "  python Setup-Engine.py --bench                  # Runs hardware benchmark via llama-bench\n"
+               "  python Setup-Engine.py --model <file.gguf>      # Launches headless background server\n"
+               "  python Setup-Engine.py --status                 # Checks active node telemetry\n"
+               "  python Setup-Engine.py --kill-zombies           # Force-kills orphaned llama-server processes\n"
+    )
+    parser.add_argument("-m", "--model", help="Path to .gguf model file")
+    parser.add_argument("-p", "--port", type=int, default=None, help="TCP port to bind")
+    parser.add_argument("--host", default=DEFAULT_HOST, help="Host address (0.0.0.0 or 127.0.0.1)")
+    parser.add_argument("-c", "--ctx", type=int, default=DEFAULT_CTX, help="Context size in tokens")
+    parser.add_argument("-t", "--threads", type=int, default=DEFAULT_THREADS, help="CPU thread allocation")
+    parser.add_argument("-ngl", "--n-gpu-layers", type=int, default=0, help="Number of layers to offload to GPU")
+    parser.add_argument("--fa", action="store_true", help="Enable Flash Attention")
+    parser.add_argument("--embedding", action="store_true", help="Enable /v1/embeddings endpoint")
+    parser.add_argument("--mmproj", help="Path to multimodal vision projector file")
+    parser.add_argument("--chat", action="store_true", help="Run direct terminal conversation (llama-cli)")
+    parser.add_argument("--bench", action="store_true", help="Run hardware inference benchmark (llama-bench)")
+    parser.add_argument("--status", action="store_true", help="Inspect local server health status")
+    parser.add_argument("--test", action="store_true", help="Run test prompt against active server")
+    parser.add_argument("--kill-zombies", action="store_true", help="Terminate orphaned llama-server processes")
+    parser.add_argument("--daemon", action="store_true", help="Keep process alive indefinitely in headless mode")
+
+    # Return None if no arguments provided (indicating interactive TUI launch)
+    if len(sys.argv) == 1:
+        return None
+    return parser.parse_args()
+
+
+# --------------------------------------------------------------------------
 # Entry Point
 # --------------------------------------------------------------------------
 
 def main():
     sys.stdout.write(UI.BASE)
+    args = parse_cli_args()
+
+    # Headless CLI Execution Path
+    if args:
+        if args.kill_zombies:
+            kill_zombie_servers()
+            return
+        if args.chat:
+            run_console_chat(model_path=args.model, threads=args.threads)
+            return
+        if args.bench:
+            run_hardware_benchmark(model_path=args.model)
+            return
+        if args.status:
+            cfg = load_last_config()
+            port = cfg.get("port")
+            if port:
+                h = probe_server_health(port)
+                print(json.dumps(h, indent=2))
+            else:
+                print(json.dumps({"status": "error", "error": "No recorded server port in config."}, indent=2))
+            return
+        if args.test:
+            cfg = load_last_config()
+            port = cfg.get("port")
+            if port:
+                res = query_chat_test(port)
+                print(json.dumps(res, indent=2))
+            else:
+                print(json.dumps({"ok": False, "error": "No recorded server port."}, indent=2))
+            return
+        if args.model:
+            success = start_server(
+                model_path=args.model,
+                port=args.port,
+                host=args.host,
+                ctx=args.ctx,
+                threads=args.threads,
+                ngl=args.n_gpu_layers,
+                fa=args.fa,
+                embedding=args.embedding,
+                mmproj_path=args.mmproj,
+                interactive=False
+            )
+            if success and args.daemon:
+                print(f"    {UI.TAG_INFO} Daemon mode engaged. Press Ctrl+C to terminate.")
+                try:
+                    while SERVER_PROC and SERVER_PROC.poll() is None:
+                        time.sleep(1)
+                except KeyboardInterrupt:
+                    cleanup_on_exit()
+            return
+
+    # Interactive TUI Execution Path
     ensure_dependencies()
     try:
         main_menu()

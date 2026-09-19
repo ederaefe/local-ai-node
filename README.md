@@ -73,7 +73,7 @@ python Setup-Engine.py
 ### 3. Choose from the Core Engine Menu
 
 1. **Quick Start Server**:
-   - Pick a model (auto-detected recursively).
+   - Pick a model (auto-detected recursively with binary GGUF header inspection).
    - Confirm collision-free port.
    - Choose network binding (`0.0.0.0` for LAN / mobile devices, or `127.0.0.1` for local only).
    - Optional hardware tuning (context size `-c`, CPU threads `-t`, GPU layers `-ngl`, Flash Attention `-fa`).
@@ -82,8 +82,37 @@ python Setup-Engine.py
    - Converse with any downloaded `.gguf` model right in your console without running a server daemon or web browser.
 3. **Hardware Benchmark (`llama-bench`)**:
    - Instant token speed profiling for prompt processing (`PP`) and text generation (`TG`).
-4. **Kill Lingering Nodes**:
+4. **Live In-Terminal Chat**:
+   - Multi-turn conversation against the active background server daemon with real-time token/sec telemetry.
+5. **Network Interface Manager**:
+   - Easily toggle between Wi-Fi, Ethernet, Hotspot, and WSL virtual adapters.
+6. **Kill Lingering Nodes**:
    - Clean up orphaned background `llama-server.exe` processes holding ports or memory.
+
+---
+
+## Headless CLI Automation
+
+`Setup-Engine.py` supports dual-mode execution. Run headlessly via command-line flags without entering the interactive TUI:
+
+```bash
+# Launch a headless background server
+python Setup-Engine.py -m Llama-3.2-1B-Instruct-IQ3_M.gguf -p 8080 --host 0.0.0.0 --daemon
+
+# Launch direct console chat via llama-cli
+python Setup-Engine.py --chat -m Llama-3.2-1B-Instruct-IQ3_M.gguf
+
+# Run hardware inference speed benchmark via llama-bench
+python Setup-Engine.py --bench -m Llama-3.2-1B-Instruct-IQ3_M.gguf
+
+# Query active server telemetry or run a test prompt
+python Setup-Engine.py --status
+python Setup-Engine.py --test
+
+# Terminate orphaned background server daemons
+python Setup-Engine.py --kill-zombies
+```
+
 
 ---
 

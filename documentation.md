@@ -35,3 +35,9 @@ Non-blocking local audit verifying:
 - **Parametric Inference Tuning**: Permits runtime configuration of context window size (`-c`), CPU core allocation (`-t`), GPU layer offloading (`-ngl`), and Flash Attention (`-fa`) during server deployment and within persistent profile presets (`server_profiles.json`).
 - **Defensive Process Hygiene**: Integrates Python `atexit` registration and interactive zombie process termination (`taskkill` / `pkill`) to prevent port locking or resource exhaustion from orphaned server daemons.
 
+### 6. Interactive CLI UI Architecture & Native Endpoints Integration
+- **Single-Stroke Event Loop (`msvcrt.getch()`)**: Eliminated "type-and-enter" friction on Windows terminals via non-blocking single-character captures, permitting instant numeric and hotkey selection while degrading safely to standard line input in piped/non-TTY environments.
+- **Card Framing & Spatial Layout**: Transitioned to Unicode rounded box framing (`╭─╮`, `│`, `╰─╯`) and breadcrumb hierarchy (`Home › Submenu`) for reduced cognitive load.
+- **Live HTTP Health & Telemetry Probing (`/health`)**: Actively polls the local `llama-server` HTTP daemon with microsecond timers to report true roundtrip latency in milliseconds and real-time slot processing state.
+- **In-Terminal REST API Completion Client**: Houses a native test harness sending standard JSON payloads to `/v1/chat/completions` via Python standard library `urllib.request`. Displays response text, duration, and generated tokens per second (`t/s`) without launching a browser.
+- **Multimodal Projector Recognition**: Segregates standard LLM weights from vision projection matrices (`mmproj*.gguf`), enabling selective `--mmproj` attachment for multimodal models.

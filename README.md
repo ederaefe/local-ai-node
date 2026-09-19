@@ -132,11 +132,17 @@ Download `.gguf` files directly from [Hugging Face](https://huggingface.co/model
 | Feature | Description |
 | :--- | :--- |
 | **Zero-Internet Architecture** | Designed for field, flight, and air-gapped use. Never stalls on disconnected networks. |
+| **Single-Stroke Interactive TUI** | Instant keypress menu navigation (`msvcrt`) with rounded card framing and breadcrumbs. |
+| **Direct Terminal Chat (`llama-cli`)** | Converse directly with local models in console without running a server or browser. |
+| **Hardware Benchmark (`llama-bench`)** | Test prompt throughput and generation speed (tokens/sec) directly from the interface. |
+| **Live Health & Telemetry Probing** | Real-time millisecond latency measurement against native `/health` and slot monitoring. |
+| **In-Terminal REST API Ping** | Run live `/v1/chat/completions` test prompts directly in console to verify inference. |
+| **Multimodal Projector Support** | Automatically categorizes and attaches vision projectors (`--mmproj`) for vision models. |
 | **Mobile QR Pairing** | Generates an ASCII QR code in the terminal. No typing long IP addresses on phone browsers. |
 | **Port Conflict Protection** | Dynamically audits socket states and assigns random open ports to prevent bind errors. |
-| **Diagnostics Suite** | 6-point pre-flight checks: binary validation, model presence, firewall rules, disk headroom, and memory. |
+| **Zombie Process Cleaner** | One-stroke force termination of orphaned background `llama-server` daemons. |
 | **Profile Manager** | Save, load, and delete named launch profiles (e.g., `fast-1b`, `heavy-reasoning-7b`). |
-| **Live Log Viewer** | Inspect internal server output without blocking the control menu, with commands to launch standalone monitors. |
+
 
 ---
 

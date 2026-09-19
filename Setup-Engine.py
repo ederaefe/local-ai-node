@@ -4,7 +4,7 @@ Setup-Engine.py - Next-Gen Interactive Control Center for llama.cpp LAN Node.
 
 Interactive terminal control center designed for ULTRA REMOTE / air-gapped environments.
 Provides single-stroke keyboard navigation, hardware diagnostics, multi-tool wrappers
-(llama-server, llama-cli, llama-bench), live HTTP health telemetry, and OpenAI-compatible
+(llama-server, llama-cli, llama-bench), closed-loop HTTP health telemetry, and OpenAI-compatible
 in-terminal test queries.
 
 Built on Python standard library modules (socket, subprocess, ctypes, urllib, msvcrt).
@@ -104,6 +104,7 @@ DEFAULT_CTX = 2048
 DEFAULT_THREADS = max(1, (os.cpu_count() or 4) - 1)
 DEFAULT_PARALLEL = 1
 PIP_TIMEOUT_SECONDS = 8
+MAX_LOG_RETENTION = 10
 
 # Live background process tracking
 SERVER_PROC = None
@@ -118,7 +119,7 @@ DEPS_PERMANENTLY_SKIPPED = False
 # --------------------------------------------------------------------------
 
 def cleanup_on_exit():
-    """Compulsory termination hook registered with atexit."""
+    """Compulsory termination hook registered with atexit and Win32 console handler."""
     global SERVER_PROC
     if SERVER_PROC and SERVER_PROC.poll() is None:
         try:
@@ -132,6 +133,31 @@ def cleanup_on_exit():
 
 
 atexit.register(cleanup_on_exit)
+
+# Hook Windows Console Close Event (Window [X] Click / CTRL_CLOSE_EVENT)
+if IS_WINDOWS:
+    try:
+        PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
+        def win32_ctrl_handler(dwCtrlType):
+            cleanup_on_exit()
+            return False  # Let default OS handler complete the shutdown
+        _win32_handler = PHANDLER_ROUTINE(win32_ctrl_handler)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_win32_handler, True)
+    except Exception:
+        pass
+
+
+def prune_logs(max_retention=MAX_LOG_RETENTION):
+    """Automatically prunes old log files to prevent infinite disk sprawl."""
+    try:
+        logs = sorted(LOG_DIR.glob("server-*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for old_log in logs[max_retention:]:
+            try:
+                old_log.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -241,7 +267,7 @@ def get_lan_ip():
 
 def is_port_free(port, host="0.0.0.0"):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1)
+    s.settimeout(0.5)
     try:
         result = s.connect_ex((host if host != "0.0.0.0" else "127.0.0.1", port))
         return result != 0
@@ -257,7 +283,7 @@ def get_random_free_port(start_range=10000, end_range=60000):
     return 48123
 
 
-def probe_server_health(port):
+def probe_server_health(port, timeout_s=0.3):
     """Queries llama-server's native /health endpoint to gauge latency and slot status."""
     try:
         t0 = time.perf_counter()
@@ -265,12 +291,44 @@ def probe_server_health(port):
             f"http://127.0.0.1:{port}/health",
             headers={"User-Agent": "Local-AI-Node"}
         )
-        with urllib.request.urlopen(req, timeout=1.5) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             latency_ms = round((time.perf_counter() - t0) * 1000, 1)
             body = json.loads(resp.read().decode('utf-8'))
             return {"status": "ok", "latency_ms": latency_ms, "body": body}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+def wait_for_server_ready(proc, port, timeout_s=25):
+    """
+    Closed-loop readiness check: Polls /health with an animated spinner
+    until the server is ready to process tokens or crashes.
+    """
+    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    start = time.perf_counter()
+    i = 0
+    sys.stdout.write(f"\n    {UI.CYAN}◈ Initializing weights & socket binding...{UI.RESET}\n")
+
+    while time.perf_counter() - start < timeout_s:
+        if proc.poll() is not None:
+            return False, "Server process terminated unexpectedly during initialization."
+
+        h = probe_server_health(port, timeout_s=0.4)
+        if h.get("status") == "ok":
+            elapsed = round(time.perf_counter() - start, 1)
+            sys.stdout.write(f"\r    {UI.TAG_OK} Model loaded and HTTP socket bound in {elapsed}s.    \n")
+            sys.stdout.flush()
+            return True, None
+
+        spin = spinner[i % len(spinner)]
+        elapsed = round(time.perf_counter() - start, 1)
+        sys.stdout.write(f"\r    {UI.AMBER}{spin}{UI.RESET} {UI.MUTED}Loading weights into memory ({elapsed}s)...{UI.RESET}")
+        sys.stdout.flush()
+        i += 1
+        time.sleep(0.3)
+
+    sys.stdout.write("\n")
+    return False, f"Server did not respond on /health within {timeout_s} seconds."
 
 
 def query_chat_test(port, user_message="Hello, test connection."):
@@ -658,6 +716,7 @@ def start_server(model_path, port, host, ctx=DEFAULT_CTX, threads=DEFAULT_THREAD
             print(f"    {UI.TAG_WARN} Port {port} occupied. Reassigned to free port {new_port}.")
         port = new_port
 
+    prune_logs(MAX_LOG_RETENTION)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     log_path = LOG_DIR / f"server-{timestamp}.log"
 
@@ -698,6 +757,8 @@ def start_server(model_path, port, host, ctx=DEFAULT_CTX, threads=DEFAULT_THREAD
             cwd=str(BASE_DIR),
             creationflags=creationflags,
         )
+        # Immediately close handle in parent; child inherited the OS file descriptor
+        log_handle.close()
     except Exception as e:
         print(f"\n    {UI.TAG_FAIL} Daemon spawn error: {e}")
         log_handle.close()
@@ -718,10 +779,11 @@ def start_server(model_path, port, host, ctx=DEFAULT_CTX, threads=DEFAULT_THREAD
         "started_at": timestamp,
     }
 
-    # Initial stability probe
-    time.sleep(2)
-    if proc.poll() is not None:
-        print(f"\n    {UI.TAG_FAIL} Server crashed upon boot. Check {log_path}")
+    # Closed-Loop Readiness Check against /health
+    ready, err = wait_for_server_ready(proc, port, timeout_s=25)
+    if not ready:
+        print(f"\n    {UI.TAG_FAIL} Server initialization failed: {err}")
+        print(f"    {UI.MUTED}Inspect output log: {log_path}{UI.RESET}")
         return False
 
     save_last_config(SERVER_INFO)
@@ -730,11 +792,25 @@ def start_server(model_path, port, host, ctx=DEFAULT_CTX, threads=DEFAULT_THREAD
     url = f"http://{ip}:{port}"
     local_url = f"http://localhost:{port}"
 
-    print(f"\n    {UI.TAG_OK} {UI.EMERALD}{UI.BOLD}LOCAL AI NODE IS LIVE & LISTENING.{UI.RESET}")
+    print(f"\n    {UI.TAG_OK} {UI.EMERALD}{UI.BOLD}LOCAL AI NODE IS CONFIRMED READY.{UI.RESET}")
     print(f"      Workstation Browser : {UI.CYAN}{local_url}{UI.RESET}")
     print(f"      LAN Access Address  : {UI.EMERALD}{url}{UI.RESET}")
     print(f"      OpenAI API Base     : {UI.WHITE}http://{ip}:{port}/v1{UI.RESET}\n")
     print_qr(url)
+
+    # Offer immediate 1-click test prompt
+    print(f"    {UI.BOLD}Verification Check:{UI.RESET}")
+    print(f"     {UI.CYAN}[y]{UI.RESET} Send quick test prompt directly to verify inference")
+    print(f"     {UI.CYAN}[Enter / n]{UI.RESET} Continue to main menu")
+    test_k = read_single_key("Action: ", ["y", "n", ""])
+    if test_k == "y":
+        print(f"\n    {UI.TAG_INFO} Transmitting test prompt to /v1/chat/completions...")
+        res = query_chat_test(port)
+        if res["ok"]:
+            print(f"    {UI.TAG_OK} {UI.BOLD}Model Response ({res['elapsed_s']}s, {res['tps']} t/s):{UI.RESET}")
+            print(f"    {UI.WHITE}\"{res['reply']}\"{UI.RESET}\n")
+        else:
+            print(f"    {UI.TAG_FAIL} Test query failed: {res['error']}\n")
 
     return True
 
@@ -802,8 +878,8 @@ def server_status_menu():
             port = SERVER_INFO.get("port")
             ip = get_lan_ip()
 
-            # Execute non-blocking live /health audit
-            h = probe_server_health(port)
+            # Execute fast non-blocking live /health audit (0.4s timeout)
+            h = probe_server_health(port, timeout_s=0.4)
             if h.get("status") == "ok":
                 health_badge = f"{UI.EMERALD}● ONLINE ({h['latency_ms']}ms){UI.RESET}"
                 slots_info = f"Slots: {h['body'].get('slots_idle', '?')}/{h['body'].get('slots_processing', '?') + h['body'].get('slots_idle', 1)} idle"
@@ -934,7 +1010,7 @@ def main_menu():
 
         running = SERVER_PROC is not None and SERVER_PROC.poll() is None
         if running:
-            h = probe_server_health(SERVER_INFO.get("port"))
+            h = probe_server_health(SERVER_INFO.get("port"), timeout_s=0.3)
             latency_str = f" | {h['latency_ms']}ms" if h.get("status") == "ok" else ""
             status_badge = f"{UI.EMERALD}● ONLINE{latency_str}{UI.RESET}{UI.BASE}"
         else:
